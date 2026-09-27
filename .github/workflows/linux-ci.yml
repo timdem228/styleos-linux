@@ -32,6 +32,8 @@ jobs:
         if: github.ref == 'refs/heads/main'
         run: |
           if [ ! -f port/apply_linux.py ]; then echo "port already applied" | tee "$RUNNER_TEMP/ci/port.log"; exit 0; fi
+          # the splash comment mentioned the old library by name and tripped the leftover check
+          sed -i 's|// ImageSharp instead of System.Drawing (GDI+ is Windows-only on .NET 7+).|// ImageSharp instead of GDI+ (Windows-only on .NET 7+).|' port/apply_linux.py
           python3 port/apply_linux.py 2>&1 | tee "$RUNNER_TEMP/ci/port.log"
           git config user.name "styleos-bot"
           git config user.email "styleos-bot@users.noreply.github.com"
