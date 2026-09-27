@@ -168,7 +168,7 @@ namespace StyleOS
                 SystemLogger.Log("EXEC", $"{user.Username}: {line}");
                 try
                 {
-                    await CommandRouter.ExecuteLine(line);
+                    await LineRunner.Execute(line);
                 }
                 catch (Exception ex)
                 {

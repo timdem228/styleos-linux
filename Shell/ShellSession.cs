@@ -36,7 +36,7 @@ namespace StyleOS
 
                 try
                 {
-                    await CommandRouter.ExecuteLine(input);
+                    await LineRunner.Execute(input);
                 }
                 catch (Exception ex)
                 {

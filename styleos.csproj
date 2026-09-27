@@ -15,7 +15,7 @@
   <ItemGroup>
     <!-- System.Drawing.Common is Windows-only since .NET 7 and System.Management is WMI:
          the Linux build uses ImageSharp for the splash image and /proc + /sys for hardware info. -->
-    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.7" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
   </ItemGroup>
 
 </Project>
