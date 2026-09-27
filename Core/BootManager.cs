@@ -1,5 +1,7 @@
 using System;
-using System.Drawing;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -187,7 +189,8 @@ namespace StyleOS
             {
                 Path.Combine(Kernel.ImageDir, "StyleOS.jpg"),
                 Path.Combine(Kernel.ImageDir, "styleos.jpg"),
-                Kernel.LogoFile
+                Kernel.LogoFile,
+                Path.Combine(Kernel.BaseDir, "img", "styleos.png")
             };
 
             string target = null;
@@ -198,17 +201,17 @@ namespace StyleOS
 
             try
             {
-#pragma warning disable CA1416
-                using var bitmap = new Bitmap(target);
+                // ImageSharp instead of GDI+ (Windows-only on .NET 7+).
+                using var image = Image.Load<Rgba32>(target);
 
                 int maxWidth = Math.Max(10, ConsoleHost.Width - 4);
                 int maxHeight = Math.Max(10, ConsoleHost.Height - 6) * 2;
 
-                float ratio = Math.Min((float)maxWidth / bitmap.Width, (float)maxHeight / bitmap.Height);
-                int width = Math.Max(1, (int)(bitmap.Width * ratio));
-                int height = Math.Max(2, (int)(bitmap.Height * ratio));
+                float ratio = Math.Min((float)maxWidth / image.Width, (float)maxHeight / image.Height);
+                int width = Math.Max(1, (int)(image.Width * ratio));
+                int height = Math.Max(2, (int)(image.Height * ratio));
 
-                using var resized = new Bitmap(bitmap, new Size(width, height));
+                image.Mutate(ctx => ctx.Resize(width, height));
 
                 int startLeft = Math.Max(0, (ConsoleHost.Width - width) / 2);
                 int startTop = Math.Max(0, (ConsoleHost.Height - height / 2) / 2);
@@ -222,8 +225,8 @@ namespace StyleOS
 
                     for (int x = 0; x < width && startLeft + x < ConsoleHost.Width - 1; x++)
                     {
-                        Color top = resized.GetPixel(x, y);
-                        Color bottom = resized.GetPixel(x, y + 1);
+                        Rgba32 top = image[x, y];
+                        Rgba32 bottom = image[x, y + 1];
 
                         bool topClear = top.A < 128 || (top.R < 15 && top.G < 15 && top.B < 15);
                         bool bottomClear = bottom.A < 128 || (bottom.R < 15 && bottom.G < 15 && bottom.B < 15);

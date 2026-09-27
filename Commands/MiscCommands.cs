@@ -4,6 +4,7 @@ using System.Data;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Formats.Tar;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -80,34 +81,117 @@ namespace StyleOS
             catch (Exception ex) { Io.Error("unzip", ex.Message); }
         }
 
-        /// <summary>tar mapped onto zip, so -czf / -xzf behave the way muscle memory expects.</summary>
+        /// <summary>
+        /// tar: real tar / tar.gz archives (System.Formats.Tar) that the host tar can read and
+        /// write. Anything that is actually a zip - by name, or by its PK header, since old
+        /// StyleOS "tar" archives were zips - still goes through unzip, so nothing old breaks.
+        /// </summary>
         public static void Tar(List<string> args)
         {
-            bool create = args.Any(a => a.StartsWith("-") && a.Contains('c'));
-            bool extract = args.Any(a => a.StartsWith("-") && a.Contains('x'));
-            bool list = args.Any(a => a.StartsWith("-") && a.Contains('t'));
-            var operands = Io.Operands(args);
+            bool create = args.Any(a => a.StartsWith("-") && !a.StartsWith("--") && a.Contains('c'));
+            bool extract = args.Any(a => a.StartsWith("-") && !a.StartsWith("--") && a.Contains('x'));
+            bool listOnly = args.Any(a => a.StartsWith("-") && !a.StartsWith("--") && a.Contains('t'));
+            bool gzipFlag = args.Any(a => a.StartsWith("-") && !a.StartsWith("--") && a.Contains('z'));
 
-            if (operands.Count == 0) { Io.Error("tar", "usage: tar -czf out.tar.gz <files> | tar -xzf archive"); return; }
+            string outDir = null;
+            int cIndex = args.IndexOf("-C");
+            if (cIndex >= 0 && cIndex + 1 < args.Count) outDir = args[cIndex + 1];
 
-            if (create) { Zip(operands); return; }
+            var operands = Io.Operands(Io.StripOptionValues(args, "-C"));
+            if (operands.Count == 0) { Io.Error("tar", "usage: tar -czf out.tar.gz <files> | tar -xzf archive [-C dir] | tar -tzf archive"); return; }
+            if (!create && !extract && !listOnly) { Io.Error("tar", "you must specify one of -c, -x or -t"); return; }
 
-            if (extract) { Unzip(operands); return; }
+            string archive = PathUtil.Resolve(operands[0]);
 
-            if (list)
+            try
             {
-                string archive = PathUtil.Resolve(operands[0]);
-                if (!File.Exists(archive)) { Io.Error("tar", $"{operands[0]}: Cannot open"); return; }
-                try
+                if (create)
                 {
-                    using var zip = ZipFile.OpenRead(archive);
-                    foreach (var entry in zip.Entries) Console.WriteLine(entry.FullName);
-                }
-                catch (Exception ex) { Io.Error("tar", ex.Message); }
-                return;
-            }
+                    if (archive.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) { Zip(operands); return; }
 
-            Io.Error("tar", "you must specify one of -c, -x or -t");
+                    bool gz = gzipFlag || archive.EndsWith(".gz", StringComparison.OrdinalIgnoreCase)
+                                       || archive.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase);
+
+                    using var file = File.Create(archive);
+                    using Stream stream = gz ? new GZipStream(file, CompressionLevel.Optimal, true) : file;
+                    using (var writer = new TarWriter(stream, TarEntryFormat.Pax, true))
+                    {
+                        foreach (var operand in operands.Skip(1))
+                        {
+                            foreach (var candidate in PathUtil.Glob(operand))
+                            {
+                                string path = PathUtil.Resolve(candidate).TrimEnd('/');
+                                string baseDir = Path.GetDirectoryName(path) ?? Kernel.CurrentDirectory;
+
+                                if (File.Exists(path))
+                                {
+                                    writer.WriteEntry(path, Path.GetFileName(path));
+                                    Console.WriteLine(Path.GetFileName(path));
+                                }
+                                else if (Directory.Exists(path))
+                                {
+                                    foreach (var f in Directory.GetFiles(path, "*", SearchOption.AllDirectories))
+                                    {
+                                        string entryName = Path.GetRelativePath(baseDir, f);
+                                        writer.WriteEntry(f, entryName);
+                                        Console.WriteLine(entryName);
+                                    }
+                                }
+                                else Io.Error("tar", $"{candidate}: Cannot stat: No such file or directory");
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                if (!File.Exists(archive)) { Io.Error("tar", $"{operands[0]}: Cannot open: No such file or directory"); return; }
+
+                if (IsZipFile(archive))
+                {
+                    if (listOnly)
+                    {
+                        using var zip = ZipFile.OpenRead(archive);
+                        foreach (var entry in zip.Entries) Console.WriteLine(entry.FullName);
+                        return;
+                    }
+                    var unzipArgs = new List<string> { operands[0] };
+                    if (outDir != null) { unzipArgs.Add("-d"); unzipArgs.Add(outDir); }
+                    Unzip(unzipArgs);
+                    return;
+                }
+
+                using (var file = File.OpenRead(archive))
+                {
+                    int b1 = file.ReadByte(), b2 = file.ReadByte();
+                    file.Position = 0;
+                    using Stream stream = b1 == 0x1F && b2 == 0x8B
+                        ? new GZipStream(file, CompressionMode.Decompress, true)
+                        : file;
+
+                    if (listOnly)
+                    {
+                        using var reader = new TarReader(stream, true);
+                        TarEntry entry;
+                        while ((entry = reader.GetNextEntry()) != null) Console.WriteLine(entry.Name);
+                        return;
+                    }
+
+                    string target = outDir != null ? PathUtil.Resolve(outDir) : Kernel.CurrentDirectory;
+                    Directory.CreateDirectory(target);
+                    TarFile.ExtractToDirectory(stream, target, true);
+                }
+            }
+            catch (Exception ex) { Io.Error("tar", ex.Message); }
+        }
+
+        private static bool IsZipFile(string path)
+        {
+            try
+            {
+                using var fs = File.OpenRead(path);
+                return fs.ReadByte() == 0x50 && fs.ReadByte() == 0x4B;
+            }
+            catch { return false; }
         }
 
         public static void Gzip(List<string> args, bool decompress)
@@ -412,7 +496,12 @@ namespace StyleOS
             {
                 if (ShellEnv.Aliases.ContainsKey(name)) { Console.WriteLine($"{name}: aliased to {ShellEnv.Aliases[name]}"); continue; }
                 if (CommandRouter.CommandNames.Contains(name)) Console.WriteLine($"/usr/bin/{name}");
-                else { Io.Error("which", $"no {name} in ({ShellEnv.Get("PATH")})"); }
+                else
+                {
+                    string host = HostPlatform.FindExecutable(name);
+                    if (host != null) Console.WriteLine($"{host} (host system, not a StyleOS command)");
+                    else Io.Error("which", $"no {name} in ({ShellEnv.Get("PATH")})");
+                }
             }
         }
 
@@ -460,16 +549,12 @@ namespace StyleOS
 
             string target = operands[0];
             string path = PathUtil.Resolve(target);
+            string what = PathUtil.Exists(path) ? path : target;
 
-            try
-            {
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = PathUtil.Exists(path) ? path : target,
-                    UseShellExecute = true
-                });
-            }
-            catch (Exception ex) { Io.Error("open", ex.Message); }
+            if (!HostPlatform.OpenExternal(what))
+                Io.Error("open", HostPlatform.IsTermux
+                    ? "could not open it - install Termux:API (pkg install termux-api)"
+                    : "no opener found (install xdg-utils) - open it yourself: " + what);
         }
 
         public static void Authors()

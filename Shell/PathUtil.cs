@@ -29,10 +29,10 @@ namespace StyleOS
             if (string.IsNullOrEmpty(path)) return "/";
             string home = Kernel.Home;
 
-            if (!string.IsNullOrEmpty(home) && path.StartsWith(home, StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrEmpty(home) && path.StartsWith(home, Kernel.IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
                 path = "~" + path.Substring(home.Length);
 
-            return path.Replace('\\', '/');
+            return Kernel.IsWindows ? path.Replace('\\', '/') : path;
         }
 
         public static bool Exists(string path) => File.Exists(path) || Directory.Exists(path);

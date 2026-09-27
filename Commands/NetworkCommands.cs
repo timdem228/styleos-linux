@@ -146,6 +146,20 @@ namespace StyleOS
 
         public static void IfConfig()
         {
+            try { IfConfigManaged(); }
+            catch (Exception ex)
+            {
+                // Android 11+ (Termux) blocks the netlink calls .NET uses here - fall back to
+                // whatever tool the host has.
+                SystemLogger.Log("NET", "managed ifconfig failed: " + ex.Message);
+                if (HostPlatform.RunStreaming("ip", "addr") >= 0) return;
+                if (HostPlatform.RunStreaming("ifconfig") >= 0) return;
+                Io.Error("ifconfig", "network interfaces are not accessible here: " + ex.Message);
+            }
+        }
+
+        private static void IfConfigManaged()
+        {
             foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
             {
                 if (nic.OperationalStatus != OperationalStatus.Up) continue;
@@ -229,6 +243,16 @@ namespace StyleOS
             if (operands.Count == 0) { Io.Error("traceroute", "missing host"); return; }
 
             string host = operands[0];
+
+            // A real traceroute / tracepath on the host gives proper per-hop results; the
+            // managed TTL loop below is only the fallback.
+            foreach (var tool in new[] { "traceroute", "tracepath" })
+            {
+                if (HostPlatform.FindExecutable(tool) == null) continue;
+                ShellEnv.ExitCode = HostPlatform.RunStreaming(tool, host) == 0 ? 0 : 1;
+                return;
+            }
+
             Console.WriteLine($"traceroute to {host}, 30 hops max, 60 byte packets");
 
             using var ping = new System.Net.NetworkInformation.Ping();
@@ -280,7 +304,12 @@ namespace StyleOS
         {
             var operands = Io.Operands(args);
             if (operands.Count == 0) { Io.Error("ssh", "usage: ssh user@host"); return; }
-            Io.Error("ssh", $"connect to host {operands[0]}: StyleOS has no ssh client yet");
+            if (HostPlatform.FindExecutable("ssh") == null)
+            {
+                Io.Error("ssh", $"connect to host {operands[0]}: no ssh client on the host (install openssh)");
+                return;
+            }
+            ShellEnv.ExitCode = HostPlatform.RunInteractive("ssh", args.ToArray());
         }
     }
 }

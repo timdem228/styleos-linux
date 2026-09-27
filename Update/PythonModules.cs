@@ -78,6 +78,10 @@ namespace StyleOS
         public static readonly string RegistryFile = Path.Combine(Kernel.SysDir, "modules_installed.json");
         private static readonly string PythonPathFile = Path.Combine(Kernel.SysDir, "python_path.txt");
 
+        /// <summary>pip installs module dependencies here (pip --target): never into the system
+        /// Python, which Debian/Ubuntu/Fedora refuse anyway (PEP 668 "externally managed").</summary>
+        public static readonly string SitePackagesDir = Path.Combine(Kernel.SysDir, "pylib", "site-packages");
+
         // ---- "modules install modules" - one-time bootstrap ----------------
 
         public static async Task Bootstrap(string version = null)
@@ -88,9 +92,9 @@ namespace StyleOS
             if (python == null)
             {
                 if (version != null)
-                    Io.Error("modules", $"Python {version} was not found. On Windows, run 'py --list' to see installed versions.");
+                    Io.Error("modules", $"Python {version} was not found (looked for 'python{version}'). Run 'ls /usr/bin/python3*' on the host to see what is installed.");
                 else
-                    Io.Error("modules", "Python was not found on PATH. Install Python 3 from python.org, then try again.");
+                    Io.Error("modules", "Python was not found on PATH. " + InstallHint("python"));
                 return;
             }
             Console.ForegroundColor = ConsoleColor.Green;
@@ -100,7 +104,7 @@ namespace StyleOS
             Console.WriteLine(":: Checking for pip...");
             if (!await RunOk(python, "-m pip --version"))
             {
-                Io.Error("modules", "pip is not available for this Python install.");
+                Io.Error("modules", "pip is not available for this Python install. " + InstallHint("pip"));
                 return;
             }
             Console.ForegroundColor = ConsoleColor.Green;
@@ -109,6 +113,7 @@ namespace StyleOS
 
             Directory.CreateDirectory(PyLibDir);
             Directory.CreateDirectory(ModulesDir);
+            Directory.CreateDirectory(SitePackagesDir);
 
             File.WriteAllText(Path.Combine(PyLibDir, "styleos.py"), StyleOsLibrarySource);
             File.WriteAllText(Path.Combine(PyLibDir, "sitecustomize.py"), SiteCustomizeSource);
@@ -230,7 +235,7 @@ namespace StyleOS
                 }
 
                 Console.WriteLine("not found, installing...");
-                if (!await RunOk(python, $"-m pip install {package}"))
+                if (!await RunOk(python, $"-m pip install --disable-pip-version-check --no-warn-script-location --target \"{SitePackagesDir}\" {package}"))
                 {
                     Io.Error("module", $"failed to install dependency '{package}', aborting");
                     return;
@@ -345,8 +350,8 @@ namespace StyleOS
             // own Python setup or anything they run outside StyleOS.
             string existingPythonPath = Environment.GetEnvironmentVariable("PYTHONPATH");
             psi.EnvironmentVariables["PYTHONPATH"] = string.IsNullOrEmpty(existingPythonPath)
-                ? PyLibDir
-                : PyLibDir + Path.PathSeparator + existingPythonPath;
+                ? PyLibDir + Path.PathSeparator + SitePackagesDir
+                : PyLibDir + Path.PathSeparator + SitePackagesDir + Path.PathSeparator + existingPythonPath;
 
             psi.EnvironmentVariables["STYLEOS_USER"] = Kernel.CurrentUser?.Username ?? "";
             psi.EnvironmentVariables["STYLEOS_CWD"] = Kernel.CurrentDirectory;
@@ -375,6 +380,23 @@ namespace StyleOS
                 }
             }
             catch (Exception ex) { Io.Error("module", $"failed to launch: {ex.Message}"); }
+        }
+
+        private static string InstallHint(string what)
+        {
+            bool pipOnly = what == "pip";
+            if (HostPlatform.IsTermux) return "In Termux: pkg install python";
+            if (HostPlatform.FindExecutable("apt-get") != null)
+                return pipOnly ? "Debian/Ubuntu: sudo apt install python3-pip" : "Debian/Ubuntu: sudo apt install python3 python3-pip";
+            if (HostPlatform.FindExecutable("dnf") != null)
+                return pipOnly ? "Fedora: sudo dnf install python3-pip" : "Fedora: sudo dnf install python3 python3-pip";
+            if (HostPlatform.FindExecutable("pacman") != null)
+                return pipOnly ? "Arch: sudo pacman -S python-pip" : "Arch: sudo pacman -S python python-pip";
+            if (HostPlatform.FindExecutable("apk") != null)
+                return pipOnly ? "Alpine: sudo apk add py3-pip" : "Alpine: sudo apk add python3 py3-pip";
+            if (HostPlatform.FindExecutable("zypper") != null)
+                return "openSUSE: sudo zypper install python3 python3-pip";
+            return "Install Python 3 and pip with your distro's package manager.";
         }
 
         // ---- helpers -----------------------------------------------------------
@@ -438,8 +460,15 @@ namespace StyleOS
                     UseShellExecute = false,
                     CreateNoWindow = true
                 };
+                // pip show / pip install must see what earlier installs put in SitePackagesDir.
+                psi.EnvironmentVariables["PYTHONPATH"] = SitePackagesDir;
+                psi.EnvironmentVariables["PIP_DISABLE_PIP_VERSION_CHECK"] = "1";
                 using var process = Process.Start(psi);
+                // Drain both pipes: a chatty pip install used to fill the buffer and hang here.
+                var stdout = process.StandardOutput.ReadToEndAsync();
+                var stderr = process.StandardError.ReadToEndAsync();
                 await process.WaitForExitAsync();
+                await Task.WhenAll(stdout, stderr);
                 return process.ExitCode == 0;
             }
             catch { return false; }

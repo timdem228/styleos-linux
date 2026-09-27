@@ -21,7 +21,7 @@ namespace StyleOS
 
     public static class ConfigManager
     {
-        public static void LoadConfig()
+        public static void LoadConfig(bool applyTheme = true)
         {
             if (File.Exists(Kernel.ConfigFile))
             {
@@ -34,7 +34,7 @@ namespace StyleOS
                 }
                 catch { Kernel.Config = new SystemConfig(); }
             }
-            ApplyTheme();
+            if (applyTheme) ApplyTheme();
         }
 
         public static void SaveConfig()
@@ -158,7 +158,17 @@ namespace StyleOS
                 string body = Uri.EscapeDataString(
                     $"Система крашнулась!\n\nВерсия: {Kernel.Version}\n\nОшибка:\n{ex.Message}\n\nStack Trace:\n{ex.StackTrace}\n\nПоследние логи:\n{logs}");
                 string url = $"https://mail.google.com/mail/?view=cm&fs=1&to=admin@timd.site&su={subject}&body={body}";
-                Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
+                if (!HostPlatform.OpenExternal(url))
+                {
+                    // Headless Linux / no browser: keep the report instead of losing it.
+                    string file = Path.Combine(Kernel.SysDir, $"crash-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+                    try { File.WriteAllText(file, Uri.UnescapeDataString(body)); } catch { }
+                    Console.WriteLine("\nНе удалось открыть браузер. Отчёт сохранён в: " + file);
+                    Console.WriteLine("Отправьте его на admin@timd.site или откройте ссылку вручную:");
+                    Console.WriteLine(url);
+                    Console.WriteLine("\nНажмите Enter...");
+                    Console.ReadLine();
+                }
                 Thread.Sleep(500);
             }
             catch { }

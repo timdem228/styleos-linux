@@ -108,6 +108,7 @@ namespace StyleOS
         {
             if (e.LinkTarget != null) return ConsoleColor.Cyan;
             if (e is DirectoryInfo) return ConsoleColor.Blue;
+            if (e is FileInfo fi && HostPlatform.IsExecutable(fi.FullName)) return ConsoleColor.Green;
             string ext = e.Extension.ToLower();
             if (ext == ".exe" || ext == ".bat" || ext == ".sh" || ext == ".cmd" || ext == ".ps1") return ConsoleColor.Green;
             if (ext == ".zip" || ext == ".rar" || ext == ".7z" || ext == ".tar" || ext == ".gz") return ConsoleColor.Red;
@@ -124,7 +125,7 @@ namespace StyleOS
 
             Console.ForegroundColor = ConsoleColor.Blue;
             Console.WriteLine(longFormat
-                ? $"drwxr-xr-x  {"-",10}  {d.LastWriteTime:MMM dd HH:mm}  {d.Name}/"
+                ? $"{Mode(d)}  {"-",10}  {d.LastWriteTime:MMM dd HH:mm}  {d.Name}/"
                 : d.Name + "/");
             Console.ResetColor();
         }
@@ -136,7 +137,7 @@ namespace StyleOS
             Console.ForegroundColor = ColorFor(f);
             string size = human ? PathUtil.HumanSize(f.Length) : f.Length.ToString();
             Console.WriteLine(longFormat
-                ? $"-rw-r--r--  {size,10}  {f.LastWriteTime:MMM dd HH:mm}  {f.Name}"
+                ? $"{Mode(f)}  {size,10}  {f.LastWriteTime:MMM dd HH:mm}  {f.Name}"
                 : f.Name);
             Console.ResetColor();
         }
@@ -474,6 +475,7 @@ namespace StyleOS
                         Console.WriteLine($"Access: {f.LastAccessTime:yyyy-MM-dd HH:mm:ss}");
                         Console.WriteLine($"Modify: {f.LastWriteTime:yyyy-MM-dd HH:mm:ss}");
                         Console.WriteLine($"Create: {f.CreationTime:yyyy-MM-dd HH:mm:ss}");
+                        Console.WriteLine($"  Mode: ({ModeOctal(f)}/{Mode(f)})");
                         Console.WriteLine($"Attrib: {f.Attributes}");
                     }
                     else if (Directory.Exists(path))
@@ -481,6 +483,7 @@ namespace StyleOS
                         var d = new DirectoryInfo(path);
                         Console.WriteLine($"  File: {d.Name}");
                         Console.WriteLine($"  Size: 4096         directory");
+                        Console.WriteLine($"  Mode: ({ModeOctal(d)}/{Mode(d)})");
                         Console.WriteLine($"Modify: {d.LastWriteTime:yyyy-MM-dd HH:mm:ss}");
                         Console.WriteLine($"Create: {d.CreationTime:yyyy-MM-dd HH:mm:ss}");
                     }
@@ -551,27 +554,145 @@ namespace StyleOS
             Console.WriteLine(PathUtil.Resolve(o[0]));
         }
 
-        /// <summary>Windows has no POSIX mode bits, so these report instead of pretending.</summary>
+        /// <summary>"drwxr-xr-x"-style string built from the real POSIX mode bits.</summary>
+        public static string Mode(FileSystemInfo entry)
+        {
+            char type = entry.LinkTarget != null ? 'l' : entry is DirectoryInfo ? 'd' : '-';
+            try
+            {
+                var m = entry.UnixFileMode;
+                var sb = new System.Text.StringBuilder();
+                sb.Append(type);
+                sb.Append(m.HasFlag(UnixFileMode.UserRead) ? 'r' : '-');
+                sb.Append(m.HasFlag(UnixFileMode.UserWrite) ? 'w' : '-');
+                sb.Append(m.HasFlag(UnixFileMode.UserExecute)
+                    ? (m.HasFlag(UnixFileMode.SetUser) ? 's' : 'x')
+                    : (m.HasFlag(UnixFileMode.SetUser) ? 'S' : '-'));
+                sb.Append(m.HasFlag(UnixFileMode.GroupRead) ? 'r' : '-');
+                sb.Append(m.HasFlag(UnixFileMode.GroupWrite) ? 'w' : '-');
+                sb.Append(m.HasFlag(UnixFileMode.GroupExecute)
+                    ? (m.HasFlag(UnixFileMode.SetGroup) ? 's' : 'x')
+                    : (m.HasFlag(UnixFileMode.SetGroup) ? 'S' : '-'));
+                sb.Append(m.HasFlag(UnixFileMode.OtherRead) ? 'r' : '-');
+                sb.Append(m.HasFlag(UnixFileMode.OtherWrite) ? 'w' : '-');
+                sb.Append(m.HasFlag(UnixFileMode.OtherExecute)
+                    ? (m.HasFlag(UnixFileMode.StickyBit) ? 't' : 'x')
+                    : (m.HasFlag(UnixFileMode.StickyBit) ? 'T' : '-'));
+                return sb.ToString();
+            }
+            catch { return type + (entry is DirectoryInfo ? "rwxr-xr-x" : "rw-r--r--"); }
+        }
+
+        public static string ModeOctal(FileSystemInfo entry)
+        {
+            try { return Convert.ToString((int)entry.UnixFileMode, 8).PadLeft(4, '0'); }
+            catch { return entry is DirectoryInfo ? "0755" : "0644"; }
+        }
+
+        /// <summary>Real chmod: octal ("755", "0644") or symbolic ("+x", "u+x", "go-w", "a=r", "u+rw,g-x").</summary>
         public static void Chmod(List<string> args)
         {
             // The mode itself ("-w", "+x", "444"...) commonly starts with '-' or '+', so this
             // reads positional args directly instead of Io.Operands(), which would otherwise
             // mistake the mode for a flag and filter it out.
-            if (args.Count < 2) { Io.Error("chmod", "missing operand"); return; }
+            bool recursive = args.Contains("-R");
+            var positional = args.Where(a => a != "-R").ToList();
+            if (positional.Count < 2) { Io.Error("chmod", "missing operand"); return; }
 
-            string mode = args[0];
-            string target = args[1];
-            string path = PathUtil.Resolve(target);
-            if (!PathUtil.Exists(path)) { Io.Error("chmod", $"cannot access '{target}': No such file or directory"); return; }
-
-            try
+            string mode = positional[0];
+            foreach (var target in positional.Skip(1))
             {
-                bool readOnly = mode.Contains("-w") || mode == "444" || mode == "555";
+                foreach (var candidate in PathUtil.Glob(target))
+                {
+                    string path = PathUtil.Resolve(candidate);
+                    if (!PathUtil.Exists(path)) { Io.Error("chmod", $"cannot access '{candidate}': No such file or directory"); continue; }
+
+                    try
+                    {
+                        ApplyMode(path, mode);
+                        if (recursive && Directory.Exists(path))
+                            foreach (var child in Directory.EnumerateFileSystemEntries(path, "*", SearchOption.AllDirectories))
+                                ApplyMode(child, mode);
+                    }
+                    catch (FormatException) { Io.Error("chmod", $"invalid mode: '{mode}'"); return; }
+                    catch (Exception ex) { Io.Error("chmod", $"changing permissions of '{candidate}': {ex.Message}"); }
+                }
+            }
+        }
+
+        private static void ApplyMode(string path, string spec)
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                bool readOnly = spec.Contains("-w") || spec == "444" || spec == "555";
                 var attrs = File.GetAttributes(path);
                 File.SetAttributes(path, readOnly ? attrs | FileAttributes.ReadOnly : attrs & ~FileAttributes.ReadOnly);
-                Console.WriteLine($"mode of '{target}' changed to {mode}");
+                return;
             }
-            catch (Exception ex) { Io.Error("chmod", ex.Message); }
+
+            var current = File.GetUnixFileMode(path);
+            File.SetUnixFileMode(path, ParseMode(spec, current, Directory.Exists(path)));
+        }
+
+        /// <summary>Parses a chmod mode spec against the current mode. Throws FormatException on garbage.</summary>
+        public static UnixFileMode ParseMode(string spec, UnixFileMode current, bool isDirectory)
+        {
+            if (string.IsNullOrEmpty(spec)) throw new FormatException();
+
+            if (spec.All(c => c >= '0' && c <= '7'))
+            {
+                if (spec.Length > 4) throw new FormatException();
+                return (UnixFileMode)Convert.ToInt32(spec, 8);
+            }
+
+            int mode = (int)current;
+            foreach (var clause in spec.Split(','))
+            {
+                int i = 0, who = 0;
+                while (i < clause.Length && "ugoa".IndexOf(clause[i]) >= 0)
+                {
+                    who |= clause[i] switch { 'u' => 4, 'g' => 2, 'o' => 1, _ => 7 };
+                    i++;
+                }
+                if (who == 0) who = 7;
+                if (i >= clause.Length) throw new FormatException();
+
+                while (i < clause.Length)
+                {
+                    char op = clause[i++];
+                    if (op != '+' && op != '-' && op != '=') throw new FormatException();
+
+                    int perms = 0;
+                    bool setId = false, sticky = false;
+                    while (i < clause.Length && "rwxXst".IndexOf(clause[i]) >= 0)
+                    {
+                        switch (clause[i])
+                        {
+                            case 'r': perms |= 4; break;
+                            case 'w': perms |= 2; break;
+                            case 'x': perms |= 1; break;
+                            case 'X': if (isDirectory || (mode & 0x49) != 0) perms |= 1; break;
+                            case 's': setId = true; break;
+                            case 't': sticky = true; break;
+                        }
+                        i++;
+                    }
+
+                    int bits = 0, mask = 0;
+                    if ((who & 4) != 0) { bits |= perms << 6; mask |= 7 << 6; if (setId) bits |= 0x800; }
+                    if ((who & 2) != 0) { bits |= perms << 3; mask |= 7 << 3; if (setId) bits |= 0x400; }
+                    if ((who & 1) != 0) { bits |= perms; mask |= 7; }
+                    if (sticky) bits |= 0x200;
+
+                    mode = op switch
+                    {
+                        '+' => mode | bits,
+                        '-' => mode & ~bits,
+                        _ => (mode & ~mask) | bits
+                    };
+                }
+            }
+            return (UnixFileMode)mode;
         }
 
         public static void Chown(List<string> args)

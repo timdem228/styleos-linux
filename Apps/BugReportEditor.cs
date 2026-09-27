@@ -6,7 +6,7 @@ namespace StyleOS
 {
     public static class BugReportEditor
     {
-        private static readonly string[] Help = { "^S Send    ^X Cancel    Arrows Move" };
+        private static readonly string[] Help = { "^S/^O Send    ^X Cancel    Arrows Move" };
 
         public static void Run()
         {
@@ -24,7 +24,7 @@ namespace StyleOS
                 if (key.Modifiers.HasFlag(ConsoleModifiers.Control) && key.Key == ConsoleKey.X) break;
                 if (key.Key == ConsoleKey.Escape) break;
 
-                if (key.Modifiers.HasFlag(ConsoleModifiers.Control) && key.Key == ConsoleKey.S)
+                if (key.Modifiers.HasFlag(ConsoleModifiers.Control) && (key.Key == ConsoleKey.S || key.Key == ConsoleKey.O))
                 {
                     Send(editor.Text);
                     break;
@@ -58,11 +58,26 @@ namespace StyleOS
                     $"Версия: {Kernel.Version}\n\nUser Description:\n{reportText}\n\nSystem Logs:\n{logs}");
                 string url = $"https://mail.google.com/mail/?view=cm&fs=1&to=admin@timd.site&su={subject}&body={body}";
 
-                Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
-
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("Браузер с подготовленным письмом открыт. Нажмите 'Отправить' в почте.");
-                SystemLogger.Log("BUGREPORT", "Draft opened in browser");
+                if (HostPlatform.OpenExternal(url))
+                {
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("Браузер с подготовленным письмом открыт. Нажмите 'Отправить' в почте.");
+                    SystemLogger.Log("BUGREPORT", "Draft opened in browser");
+                }
+                else
+                {
+                    // Headless Linux / Termux without Termux:API: save it instead of losing it.
+                    string file = System.IO.Path.Combine(Kernel.SysDir, $"bugreport-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+                    System.IO.File.WriteAllText(file, $"Версия: {Kernel.Version}\n\n{reportText}\n\nSystem Logs:\n{logs}");
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("Браузер не найден. Отчёт сохранён в: " + file);
+                    Console.WriteLine("Отправьте его на admin@timd.site или откройте ссылку вручную:");
+                    Console.ResetColor();
+                    Console.WriteLine(url);
+                    SystemLogger.Log("BUGREPORT", "Saved to " + file);
+                    Console.WriteLine("\nНажмите любую клавишу...");
+                    try { Console.ReadKey(true); } catch { }
+                }
             }
             catch (Exception ex)
             {

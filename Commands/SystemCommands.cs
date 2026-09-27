@@ -8,26 +8,86 @@ namespace StyleOS
 {
     public static class DiskCommands
     {
+        /// <summary>Virtual filesystems df hides unless -a is given, like coreutils df.</summary>
+        private static readonly HashSet<string> PseudoFs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "proc", "sysfs", "devpts", "cgroup", "cgroup2", "securityfs", "pstore", "debugfs", "tracefs",
+            "configfs", "fusectl", "mqueue", "hugetlbfs", "bpf", "autofs", "binfmt_misc", "efivarfs",
+            "rpc_pipefs", "nsfs", "selinuxfs", "functionfs", "ramfs"
+        };
+
+        private class MountEntry
+        {
+            public string Device;
+            public string MountPoint;
+            public string FsType;
+            public string Options;
+        }
+
+        private static List<MountEntry> ReadMounts()
+        {
+            var result = new List<MountEntry>();
+            string text = HostPlatform.ReadText("/proc/self/mounts") ?? HostPlatform.ReadText("/proc/mounts");
+            if (string.IsNullOrEmpty(text)) return result;
+
+            foreach (var line in text.Split('\n'))
+            {
+                var parts = line.Split(' ');
+                if (parts.Length < 4) continue;
+                result.Add(new MountEntry
+                {
+                    Device = Unescape(parts[0]),
+                    MountPoint = Unescape(parts[1]),
+                    FsType = parts[2],
+                    Options = parts[3]
+                });
+            }
+            return result;
+        }
+
+        private static string Unescape(string s) =>
+            s.Replace("\\040", " ").Replace("\\011", "\t").Replace("\\012", "\n").Replace("\\134", "\\");
+
         public static void Df(List<string> args)
         {
             bool human = Io.HasFlag(args, "-h");
-            Console.WriteLine($"{"Filesystem",-16}{(human ? "Size" : "1K-blocks"),12}{"Used",12}{"Avail",12}{"Use%",6}  Mounted on");
+            bool all = Io.HasFlag(args, "-a");
+            bool showType = Io.HasFlag(args, "-T");
 
-            foreach (var drive in DriveInfo.GetDrives())
+            var devices = new Dictionary<string, MountEntry>();
+            foreach (var m in ReadMounts()) devices[m.MountPoint] = m;
+
+            string typeHeader = showType ? $"{"Type",-10}" : "";
+            Console.WriteLine($"{"Filesystem",-24}{typeHeader}{(human ? "Size" : "1K-blocks"),12}{"Used",12}{"Avail",12}{"Use%",6}  Mounted on");
+
+            string Fmt(long bytes) => human ? PathUtil.HumanSize(bytes) : (bytes / 1024).ToString();
+
+            DriveInfo[] drives;
+            try { drives = DriveInfo.GetDrives(); }
+            catch (Exception ex) { Io.Error("df", ex.Message); return; }
+
+            foreach (var drive in drives)
             {
-                if (!drive.IsReady) continue;
                 try
                 {
+                    if (!drive.IsReady) continue;
+                    string fsType = drive.DriveFormat;
+                    if (!all && PseudoFs.Contains(fsType)) continue;
+
                     long total = drive.TotalSize;
-                    long free = drive.TotalFreeSpace;
-                    long used = total - free;
+                    if (!all && total <= 0) continue;
 
-                    // total can legitimately be 0 on some virtual drives - that used to divide by zero.
-                    int percent = total <= 0 ? 0 : (int)Math.Round(used * 100.0 / total);
+                    long avail = drive.AvailableFreeSpace;
+                    long used = total - drive.TotalFreeSpace;
 
-                    string Fmt(long bytes) => human ? PathUtil.HumanSize(bytes) : (bytes / 1024).ToString();
+                    // total can legitimately be 0 on virtual filesystems - no divide by zero.
+                    int percent = total <= 0 ? 0 : (int)Math.Ceiling(used * 100.0 / total);
 
-                    Console.WriteLine($"{drive.Name,-16}{Fmt(total),12}{Fmt(used),12}{Fmt(free),12}{percent + "%",6}  {drive.RootDirectory}");
+                    string mountPoint = drive.Name;
+                    string device = devices.TryGetValue(mountPoint, out var entry) ? entry.Device : fsType;
+                    string type = showType ? $"{fsType,-10}" : "";
+
+                    Console.WriteLine($"{device,-24}{type}{Fmt(total),12}{Fmt(used),12}{Fmt(avail),12}{percent + "%",6}  {mountPoint}");
                 }
                 catch { }
             }
@@ -35,31 +95,86 @@ namespace StyleOS
 
         public static void Mount()
         {
-            Console.WriteLine("sysfs on /sys type sysfs (rw,nosuid,nodev,noexec,relatime)");
-            Console.WriteLine("proc on /proc type proc (rw,nosuid,nodev,noexec,relatime)");
+            var mounts = ReadMounts();
             Console.WriteLine($"styleos on / type styleosfs (rw,relatime,kernel={Kernel.Version})");
 
-            foreach (var drive in DriveInfo.GetDrives().Where(d => d.IsReady))
+            if (mounts.Count == 0)
             {
-                try { Console.WriteLine($"{drive.Name} on /mnt/{drive.Name.TrimEnd('\\', ':').ToLower()} type {drive.DriveFormat} (rw,relatime)"); }
-                catch { }
+                Console.WriteLine("sysfs on /sys type sysfs (rw,nosuid,nodev,noexec,relatime)");
+                Console.WriteLine("proc on /proc type proc (rw,nosuid,nodev,noexec,relatime)");
+                return;
             }
+
+            foreach (var m in mounts)
+                Console.WriteLine($"{m.Device} on {m.MountPoint} type {m.FsType} ({m.Options})");
         }
 
         public static void Lsblk()
         {
-            Console.WriteLine($"{"NAME",-10}{"SIZE",10} {"TYPE",-6} {"FSTYPE",-8} MOUNTPOINT");
-            foreach (var drive in DriveInfo.GetDrives())
+            Console.WriteLine($"{"NAME",-14}{"SIZE",9} {"RO",-3}{"TYPE",-6}MOUNTPOINTS");
+            var mounts = ReadMounts();
+            bool any = false;
+
+            try
             {
-                try
+                if (Directory.Exists("/sys/block"))
                 {
-                    string name = drive.Name.TrimEnd('\\', ':').ToLower();
-                    string size = drive.IsReady ? PathUtil.HumanSize(drive.TotalSize) : "-";
-                    string fs = drive.IsReady ? drive.DriveFormat : "-";
-                    Console.WriteLine($"{"sd" + name,-10}{size,10} {drive.DriveType.ToString().ToLower(),-6} {fs,-8} {drive.Name}");
+                    foreach (var dev in Directory.GetDirectories("/sys/block").OrderBy(d => d, StringComparer.Ordinal))
+                    {
+                        string name = Path.GetFileName(dev);
+                        long sectors = ReadLong(Path.Combine(dev, "size"));
+                        if (sectors <= 0) continue;
+
+                        string type = name.StartsWith("loop") ? "loop" : name.StartsWith("sr") ? "rom" : "disk";
+                        PrintBlock(name, sectors, dev, type, mounts, "");
+                        any = true;
+
+                        var parts = Directory.GetDirectories(dev)
+                            .Where(p => File.Exists(Path.Combine(p, "partition")))
+                            .OrderBy(p => p, StringComparer.Ordinal)
+                            .ToList();
+
+                        for (int i = 0; i < parts.Count; i++)
+                        {
+                            PrintBlock(Path.GetFileName(parts[i]), ReadLong(Path.Combine(parts[i], "size")), parts[i],
+                                "part", mounts, i == parts.Count - 1 ? "└─" : "├─");
+                        }
+                    }
                 }
-                catch { }
             }
+            catch (Exception ex) { SystemLogger.Log("DISK", "lsblk: " + ex.Message); }
+
+            if (any) return;
+
+            // No /sys/block (Termux, most containers): show what the mount table knows.
+            try
+            {
+                foreach (var drive in DriveInfo.GetDrives())
+                {
+                    try
+                    {
+                        if (!drive.IsReady || drive.TotalSize <= 0 || PseudoFs.Contains(drive.DriveFormat)) continue;
+                        string device = mounts.FirstOrDefault(m => m.MountPoint == drive.Name)?.Device ?? drive.DriveFormat;
+                        string name = Path.GetFileName(device.TrimEnd('/'));
+                        if (string.IsNullOrEmpty(name)) name = device;
+                        Console.WriteLine($"{name,-14}{PathUtil.HumanSize(drive.TotalSize),9} {"0",-3}{drive.DriveType.ToString().ToLower(),-6}{drive.Name}");
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex) { Io.Error("lsblk", ex.Message); }
+        }
+
+        private static long ReadLong(string path) =>
+            long.TryParse(HostPlatform.ReadFirstLine(path), out long v) ? v : 0;
+
+        private static void PrintBlock(string name, long sectors, string sysPath, string type, List<MountEntry> mounts, string prefix)
+        {
+            bool ro = HostPlatform.ReadFirstLine(Path.Combine(sysPath, "ro")) == "1";
+            string points = string.Join(",", mounts
+                .Where(m => m.Device == "/dev/" + name || m.Device == "/dev/mapper/" + name)
+                .Select(m => m.MountPoint));
+            Console.WriteLine($"{prefix + name,-14}{PathUtil.HumanSize(sectors * 512),9} {(ro ? "1" : "0"),-3}{type,-6}{points}");
         }
     }
 

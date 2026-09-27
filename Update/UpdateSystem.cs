@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Formats.Tar;
 using System.Linq;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -168,12 +170,13 @@ namespace StyleOS
 
                 if (element.TryGetProperty("assets", out var assets) && assets.GetArrayLength() > 0)
                 {
-                    var zip = assets.EnumerateArray()
-                        .FirstOrDefault(a => (a.GetProperty("name").GetString() ?? "").EndsWith(".zip", StringComparison.OrdinalIgnoreCase));
-
-                    var chosen = zip.ValueKind == JsonValueKind.Object ? zip : assets[0];
-                    info.DownloadUrl = chosen.GetProperty("browser_download_url").GetString();
-                    info.ArchiveFileName = chosen.GetProperty("name").GetString();
+                    // Only ever pick a build that runs here - never fall back to a Windows zip.
+                    var chosen = PickLinuxAsset(assets);
+                    if (chosen.ValueKind == JsonValueKind.Object)
+                    {
+                        info.DownloadUrl = chosen.GetProperty("browser_download_url").GetString();
+                        info.ArchiveFileName = chosen.GetProperty("name").GetString();
+                    }
 
                     foreach (var asset in assets.EnumerateArray())
                     {
@@ -190,9 +193,53 @@ namespace StyleOS
             catch { return null; }
         }
 
+        /// <summary>
+        /// Picks the release asset for this machine. Self-contained builds are named
+        /// *-linux-x64 / *-linux-arm64 (.tar.gz, .tgz or .zip); *-portable is framework-dependent
+        /// (needs a dotnet runtime) and is the only kind that runs in Termux, where glibc
+        /// builds can't.
+        /// </summary>
+        private static JsonElement PickLinuxAsset(JsonElement assets)
+        {
+            string[] archNames = RuntimeInformation.OSArchitecture switch
+            {
+                Architecture.Arm64 => new[] { "arm64", "aarch64" },
+                Architecture.Arm => new[] { "arm32", "armhf", "armv7" },
+                Architecture.X86 => new[] { "x86", "i686" },
+                _ => new[] { "x64", "amd64", "x86_64" }
+            };
+
+            JsonElement best = default;
+            int bestScore = 0;
+            foreach (var asset in assets.EnumerateArray())
+            {
+                string name = ((asset.TryGetProperty("name", out var n) ? n.GetString() : null) ?? "").ToLowerInvariant();
+                bool archive = name.EndsWith(".tar.gz") || name.EndsWith(".tgz") || name.EndsWith(".zip");
+                if (!archive) continue;
+
+                int score = 0;
+                if (name.Contains("portable")) score = HostPlatform.IsTermux ? 200 : 50;
+                else if (name.Contains("linux") && archNames.Any(a => name.Contains(a)) && !HostPlatform.IsTermux) score = 100;
+                if (score == 0) continue;
+                if (!name.EndsWith(".zip")) score++;
+
+                if (score > bestScore) { bestScore = score; best = asset; }
+            }
+            return best;
+        }
+
         public static async Task RunUpdateProcess(string channel)
         {
             channel = channel == BetaChannel ? BetaChannel : StableChannel;
+
+            // Installed with the styleos Python tool (or any git checkout): update means
+            // git pull + rebuild, releases aren't involved at all.
+            if (SourceUpdater.IsSourceInstall)
+            {
+                await SourceUpdater.Run();
+                return;
+            }
+
             SystemLogger.Log("PACMAN", $"Checking for updates on the {channel} channel");
 
             Console.WriteLine($":: Synchronising package databases ({channel} channel)...");
@@ -241,7 +288,7 @@ namespace StyleOS
 
             if (string.IsNullOrEmpty(release.DownloadUrl))
             {
-                Io.Error("pacman", "this release has no downloadable artifact attached");
+                Io.Error("pacman", "this release has no build for this machine attached (expected *-linux-<arch>.tar.gz or *-portable.tar.gz) - reinstall from source with 'styleos install'");
                 return;
             }
 
@@ -250,14 +297,15 @@ namespace StyleOS
 
         private static async Task Install(ReleaseInfo release)
         {
-            string tempZip = Path.Combine(Path.GetTempPath(), "styleos_update.zip");
-            string extractPath = Path.Combine(Path.GetTempPath(), "styleos_update_extracted");
+            string work = Path.Combine(Path.GetTempPath(), $"styleos_update_{Environment.ProcessId}");
+            string archivePath = Path.Combine(work, release.ArchiveFileName ?? "update.bin");
+            string extractPath = Path.Combine(work, "extracted");
 
             try
             {
                 using var client = CreateClient();
 
-                Console.WriteLine($":: Downloading {release.Tag}...");
+                Console.WriteLine($":: Downloading {release.Tag} ({release.ArchiveFileName})...");
                 byte[] data = await client.GetByteArrayAsync(release.DownloadUrl);
 
                 if (!string.IsNullOrEmpty(release.SumsUrl) && !string.IsNullOrEmpty(release.SignatureUrl))
@@ -289,55 +337,124 @@ namespace StyleOS
                     Console.ResetColor();
                 }
 
-                if (File.Exists(tempZip)) File.Delete(tempZip);
-                if (Directory.Exists(extractPath)) Directory.Delete(extractPath, true);
-
-                File.WriteAllBytes(tempZip, data);
+                if (Directory.Exists(work)) Directory.Delete(work, true);
+                Directory.CreateDirectory(extractPath);
+                File.WriteAllBytes(archivePath, data);
                 Console.WriteLine($":: Downloaded {PathUtil.HumanSize(data.Length)}, extracting...");
 
-                ZipFile.ExtractToDirectory(tempZip, extractPath);
+                ExtractArchive(archivePath, extractPath);
 
-                // A release zip often wraps everything in one folder - unwrap it so the
-                // files land next to the exe instead of in a nested directory.
+                // A release archive often wraps everything in one folder - unwrap it so the
+                // files land next to the binary instead of in a nested directory.
                 var entries = Directory.GetFileSystemEntries(extractPath);
-                if (entries.Length == 1 && Directory.Exists(entries[0])) extractPath = entries[0];
+                string source = entries.Length == 1 && Directory.Exists(entries[0]) ? entries[0] : extractPath;
 
-                string currentExe = Process.GetCurrentProcess().MainModule?.FileName;
-                if (string.IsNullOrEmpty(currentExe)) { Io.Error("pacman", "cannot locate the running executable"); return; }
+                int replaced = ApplyStagedFiles(source, Kernel.BaseDir);
+                try { Directory.Delete(work, true); } catch { }
 
-                string currentDir = Path.GetDirectoryName(currentExe);
-                string updater = Path.Combine(Path.GetTempPath(), "styleos_updater.bat");
-
-                string batch = $@"@echo off
-title {Kernel.DistroName} Updater
-echo Applying update {release.Tag}, please wait...
-ping 127.0.0.1 -n 3 > nul
-xcopy /Y /E /I ""{extractPath}\*"" ""{currentDir}""
-echo Cleaning up...
-del ""{tempZip}"" 2> nul
-rmdir /S /Q ""{extractPath}"" 2> nul
-echo Restarting {Kernel.DistroName}...
-start """" ""{currentExe}""
-del ""%~f0""
-";
-                File.WriteAllText(updater, batch);
-
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = updater,
-                    UseShellExecute = true,
-                    WindowStyle = ProcessWindowStyle.Hidden
-                });
-
-                SystemLogger.Log("PACMAN", $"Installing {release.Tag}");
-                Console.WriteLine(":: Update staged. The system will restart to apply it...");
-                Thread.Sleep(1200);
-                Environment.Exit(0);
+                SystemLogger.Log("PACMAN", $"Installed {release.Tag} ({replaced} files)");
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($":: {release.Tag} installed ({replaced} files). Restarting...");
+                Console.ResetColor();
+                Thread.Sleep(800);
+                Restart();
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                Io.Error("pacman", $"no write access to {Kernel.BaseDir} ({ex.Message}) - reinstall StyleOS into a folder you own");
             }
             catch (Exception ex)
             {
                 Io.Error("pacman", $"update failed: {ex.Message}");
                 SystemLogger.Log("PACMAN", "Update failed: " + ex.Message);
+            }
+        }
+
+        private static void ExtractArchive(string archive, string destination)
+        {
+            string lower = archive.ToLowerInvariant();
+            if (lower.EndsWith(".zip")) { ZipFile.ExtractToDirectory(archive, destination, true); return; }
+
+            using var file = File.OpenRead(archive);
+            using Stream stream = lower.EndsWith(".gz") || lower.EndsWith(".tgz")
+                ? new GZipStream(file, CompressionMode.Decompress)
+                : file;
+            TarFile.ExtractToDirectory(stream, destination, true);
+        }
+
+        /// <summary>
+        /// Copies every staged file over the install. Each file is written next to its target
+        /// and then renamed onto it: the rename swaps the directory entry atomically, so the
+        /// running StyleOS keeps its old (still open) copy and nothing is ever half-written.
+        /// </summary>
+        public static int ApplyStagedFiles(string sourceDir, string targetDir)
+        {
+            int count = 0;
+            foreach (var file in Directory.GetFiles(sourceDir, "*", SearchOption.AllDirectories))
+            {
+                string relative = Path.GetRelativePath(sourceDir, file);
+                string target = Path.Combine(targetDir, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(target));
+
+                string temp = target + ".styleos-new";
+                File.Copy(file, temp, true);
+                if (!OperatingSystem.IsWindows())
+                {
+                    try { File.SetUnixFileMode(temp, File.GetUnixFileMode(file)); } catch { }
+                }
+                File.Move(temp, target, true);
+                count++;
+            }
+
+            if (!OperatingSystem.IsWindows())
+            {
+                string apphost = Path.Combine(targetDir, "StyleOS");
+                try
+                {
+                    if (File.Exists(apphost))
+                        File.SetUnixFileMode(apphost, File.GetUnixFileMode(apphost)
+                            | UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute);
+                }
+                catch { }
+            }
+            return count;
+        }
+
+        /// <summary>
+        /// Starts the freshly installed StyleOS in this same terminal and exits with its code.
+        /// (The Windows build did this with a .bat file and a second console window.)
+        /// </summary>
+        public static void Restart()
+        {
+            try
+            {
+                ConsoleHost.Reset();
+                string processPath = Environment.ProcessPath ?? "";
+                string apphost = Path.Combine(Kernel.BaseDir, "StyleOS");
+                string dll = Path.Combine(Kernel.BaseDir, "StyleOS.dll");
+
+                var psi = new ProcessStartInfo { UseShellExecute = false };
+                bool viaDotnet = Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase)
+                                 || !File.Exists(apphost);
+                if (viaDotnet)
+                {
+                    psi.FileName = string.IsNullOrEmpty(processPath) ? "dotnet" : processPath;
+                    psi.ArgumentList.Add(dll);
+                }
+                else psi.FileName = apphost;
+
+                foreach (var arg in Environment.GetCommandLineArgs().Skip(1)) psi.ArgumentList.Add(arg);
+
+                try { Console.TreatControlCAsInput = false; } catch { }
+                using var child = Process.Start(psi);
+                child.WaitForExit();
+                Environment.Exit(child.ExitCode);
+            }
+            catch (Exception ex)
+            {
+                Io.Error("pacman", $"installed, but could not restart automatically ({ex.Message}) - start StyleOS again");
+                Kernel.IsRunning = false;
+                Kernel.CurrentUser = null;
             }
         }
 

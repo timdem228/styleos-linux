@@ -37,10 +37,11 @@ namespace StyleOS
                 ("", new string('-', title.Length)),
                 ("OS", $"{Kernel.DistroName} {Kernel.Version} ({Kernel.Arch})"),
                 ("Kernel", Kernel.KernelString),
+                ("Host OS", $"{HostPlatform.OsPrettyName()} (linux {HostPlatform.KernelRelease()})"),
                 ("Host", HostModel()),
                 ("Uptime", FormatUptime(Kernel.Uptime)),
                 ("Shell", "styleshell 1.1"),
-                ("Terminal", ConsoleHost.IsWindowsTerminal ? "Windows Terminal" : "console"),
+                ("Terminal", HostPlatform.TerminalName()),
                 ("Resolution", $"{ConsoleHost.Width}x{ConsoleHost.Height} cells"),
                 ("Packages", $"{PackageManager.InstalledCount()} (pacman)"),
                 ("CPU", $"{hw.Cpu} ({Environment.ProcessorCount})"),
@@ -104,7 +105,7 @@ namespace StyleOS
         {
             try
             {
-                string model = WmiValue("Win32_ComputerSystem", "Model");
+                string model = HostPlatform.HostModel();
                 return string.IsNullOrWhiteSpace(model) ? Environment.MachineName : model;
             }
             catch { return Environment.MachineName; }
@@ -138,21 +139,18 @@ namespace StyleOS
             }
             catch { }
 
-            if (Kernel.IsWindows)
+            try
             {
-                try
-                {
-                    string c = WmiValue("Win32_Processor", "Name");
-                    if (!string.IsNullOrWhiteSpace(c)) cpu = c.Trim();
+                string c = HostPlatform.CpuModel();
+                if (!string.IsNullOrWhiteSpace(c)) cpu = c.Trim();
 
-                    string g = WmiValue("Win32_VideoController", "Name");
-                    if (!string.IsNullOrWhiteSpace(g)) gpu = g.Trim();
+                string g = HostPlatform.GpuName();
+                if (!string.IsNullOrWhiteSpace(g)) gpu = g.Trim();
 
-                    string mem = WmiValue("Win32_OperatingSystem", "TotalVisibleMemorySize");
-                    if (long.TryParse(mem, out long kb)) totalMb = kb / 1024;
-                }
-                catch (Exception ex) { SystemLogger.Log("SYSINFO", "WMI unavailable: " + ex.Message); }
+                var mem = HostPlatform.MemInfo();
+                if (mem.TotalMb > 0) totalMb = mem.TotalMb;
             }
+            catch (Exception ex) { SystemLogger.Log("SYSINFO", "/proc unavailable: " + ex.Message); }
 
             if (totalMb <= 0) totalMb = 1;
             _cache = (cpu, gpu, totalMb, 0);
@@ -161,37 +159,15 @@ namespace StyleOS
 
         private static long FreeMemoryMb(long totalMb)
         {
-            if (Kernel.IsWindows)
-            {
-                string free = WmiValue("Win32_OperatingSystem", "FreePhysicalMemory");
-                if (long.TryParse(free, out long kb)) return kb / 1024;
-            }
+            var mem = HostPlatform.MemInfo();
+            if (mem.TotalMb > 0) return mem.AvailableMb;
+
             try
             {
                 long used = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024);
                 return Math.Max(0, totalMb - used);
             }
             catch { return totalMb / 2; }
-        }
-
-        private static string WmiValue(string wmiClass, string property)
-        {
-            if (!Kernel.IsWindows) return "";
-            try
-            {
-#pragma warning disable CA1416
-                using (var searcher = new System.Management.ManagementObjectSearcher($"select {property} from {wmiClass}"))
-                {
-                    foreach (var item in searcher.Get())
-                    {
-                        var value = item[property];
-                        if (value != null) return value.ToString();
-                    }
-                }
-#pragma warning restore CA1416
-            }
-            catch { }
-            return "";
         }
 
         public static void Uname(List<string> args)
@@ -213,7 +189,7 @@ namespace StyleOS
         public static void Uptime()
         {
             var t = Kernel.Uptime;
-            Console.WriteLine($" {DateTime.Now:HH:mm:ss} up {FormatUptime(t)},  1 user,  load average: 0.00, 0.01, 0.05");
+            Console.WriteLine($" {DateTime.Now:HH:mm:ss} up {FormatUptime(t)},  1 user,  load average: {HostPlatform.LoadAverage()}");
         }
 
         public static void Free(List<string> args)
@@ -233,7 +209,8 @@ namespace StyleOS
 
             Console.WriteLine($"{"",-10}{"total",12}{"used",12}{"free",12}{"shared",12}{"available",12}");
             Console.WriteLine($"{"Mem:",-10}{Fmt(total),12}{Fmt(used),12}{Fmt(free),12}{Fmt(0),12}{Fmt(free),12}");
-            Console.WriteLine($"{"Swap:",-10}{Fmt(total / 2),12}{Fmt(0),12}{Fmt(total / 2),12}");
+            var swap = HostPlatform.SwapInfo();
+            Console.WriteLine($"{"Swap:",-10}{Fmt(swap.TotalMb),12}{Fmt(Math.Max(0, swap.TotalMb - swap.FreeMb)),12}{Fmt(swap.FreeMb),12}");
         }
 
         public static void Lscpu()
@@ -243,7 +220,7 @@ namespace StyleOS
             Console.WriteLine($"CPU(s):                {Environment.ProcessorCount}");
             Console.WriteLine($"Model name:            {hw.Cpu}");
             Console.WriteLine($"Byte Order:            {(BitConverter.IsLittleEndian ? "Little Endian" : "Big Endian")}");
-            Console.WriteLine($"Virtualization:        {(Environment.ProcessorCount > 2 ? "VT-x" : "none")}");
+            Console.WriteLine($"Virtualization:        {HostPlatform.Virtualization()}");
             Console.WriteLine($"Kernel:                {Kernel.KernelString}");
         }
 
@@ -263,7 +240,7 @@ namespace StyleOS
                         .ToList();
 
                     ConsoleHost.SetCursor(0, 0);
-                    Console.WriteLine(ConsoleHost.FullLine($"top - {DateTime.Now:HH:mm:ss} up {FormatUptime(Kernel.Uptime)},  load average: 0.00, 0.01, 0.05"));
+                    Console.WriteLine(ConsoleHost.FullLine($"top - {DateTime.Now:HH:mm:ss} up {FormatUptime(Kernel.Uptime)},  load average: {HostPlatform.LoadAverage()}"));
                     Console.WriteLine(ConsoleHost.FullLine($"Tasks: {procs.Count} shown, {Process.GetProcesses().Length} total"));
                     Console.WriteLine(ConsoleHost.FullLine($"MiB Mem : {hw.TotalMemMb} total, {hw.FreeMemMb} free, {hw.TotalMemMb - hw.FreeMemMb} used"));
 

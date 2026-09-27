@@ -81,7 +81,7 @@ namespace StyleOS
             Add("basename", files, "basename <path>", "Strip the directory from a path", FileCommands.Basename);
             Add("dirname", files, "dirname <path>", "Strip the file name from a path", FileCommands.Dirname);
             Add("realpath", files, "realpath <path>", "Print the absolute path", FileCommands.Realpath);
-            Add("chmod", files, "chmod <mode> <path>", "Change the read-only attribute", FileCommands.Chmod);
+            Add("chmod", files, "chmod [-R] <mode> <path...>", "Change file permissions (755, u+x, go-w ...)", FileCommands.Chmod);
             Add("chown", files, "chown <user> <path>", "Change the owner (informational)", FileCommands.Chown);
 
             // ---- text --------------------------------------------------------
@@ -142,7 +142,7 @@ namespace StyleOS
             AddAsync("nslookup,dig,host", net, "nslookup <host>", "Resolve a host name", NetworkCommands.Nslookup);
             AddAsync("traceroute,tracert", net, "traceroute <host>", "Trace the route to a host", NetworkCommands.Traceroute);
             Add("hostname", net, "hostname [-I] [name]", "Show or set the host name", NetworkCommands.Hostname);
-            Add("ssh", net, "ssh user@host", "Remote shell (not implemented yet)", NetworkCommands.Ssh);
+            Add("ssh", net, "ssh user@host", "Remote shell (uses the host ssh client)", NetworkCommands.Ssh, true);
 
             // ---- disks -------------------------------------------------------
             Add("df", disk, "df [-h]", "Free space per filesystem", DiskCommands.Df);

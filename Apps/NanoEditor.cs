@@ -8,7 +8,7 @@ namespace StyleOS
     {
         private static readonly string[] Help =
         {
-            "^S Save   ^X Exit   ^W Where Is   ^G Go To Line",
+            "^O/^S Save   ^X Exit   ^W Where Is   ^G Go To Line",
             "^K Cut    ^U Paste  Arrows Move   Tab Indent"
         };
 
@@ -57,6 +57,7 @@ namespace StyleOS
                             continue;
 
                         case ConsoleKey.S:
+                        case ConsoleKey.O:
                             SaveFile(editor, filePath);
                             continue;
 
