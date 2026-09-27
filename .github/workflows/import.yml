@@ -1,0 +1,23 @@
+name: import-upstream
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copy sources from timdem228/styleos-
+        run: |
+          if [ -f Program.cs ]; then echo "already imported"; exit 0; fi
+          git clone --depth 1 https://github.com/timdem228/styleos-.git /tmp/up
+          rm -rf /tmp/up/.git /tmp/up/.github
+          cp -rn /tmp/up/. .
+          git config user.name "styleos-bot"
+          git config user.email "styleos-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "import: copy of timdem228/styleos- (Windows original)"
+          git push
