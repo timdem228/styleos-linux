@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -7,12 +7,15 @@
     <Nullable>disable</Nullable>
     <AssemblyName>StyleOS</AssemblyName>
     <RootNamespace>StyleOS</RootNamespace>
+    <Version>1.1.7</Version>
     <InvariantGlobalization>false</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.Drawing.Common" Version="10.0.8" />
-    <PackageReference Include="System.Management" Version="8.0.0" />
+    <!-- System.Drawing.Common is Windows-only since .NET 7 and System.Management is WMI:
+         the Linux build uses ImageSharp for the splash image and /proc + /sys for hardware info. -->
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.7" />
   </ItemGroup>
 
 </Project>

@@ -5,54 +5,20 @@ using System.Threading;
 namespace StyleOS
 {
     /// <summary>
-    /// Everything that touches the real terminal window.
-    /// Contains the Windows 11 maximize fix: on Win11 the default host is Windows Terminal,
-    /// where GetConsoleWindow() returns a hidden pseudo-console window, so the old
-    /// ShowWindow(SW_MAXIMIZE) call silently did nothing.
+    /// Everything that touches the real terminal. Linux build: no Win32 calls at all.
+    /// ANSI/VT is native on every Linux terminal (and in Termux), so there is nothing to
+    /// switch on; "fullscreen" is an XTWINOPS request that terminals which allow it honour
+    /// and everything else silently ignores.
     /// </summary>
     public static class ConsoleHost
     {
-        private const int STD_OUTPUT_HANDLE = -11;
-        private const uint ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
-        private const uint ENABLE_PROCESSED_OUTPUT = 0x0001;
-        private const int SW_MAXIMIZE = 3;
-        private const int SW_SHOW = 5;
-        private const uint GA_ROOTOWNER = 3;
+        // Kept alive for the lifetime of the process - disposing them unregisters the handler.
+        private static PosixSignalRegistration _sigTerm, _sigHup;
+        private static bool _handlersInstalled;
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern IntPtr GetStdHandle(int nStdHandle);
-
-        [DllImport("kernel32.dll")]
-        private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
-
-        [DllImport("kernel32.dll")]
-        private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
-
-        [DllImport("kernel32.dll", ExactSpelling = true)]
-        private static extern IntPtr GetConsoleWindow();
-
-        [DllImport("user32.dll")]
-        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-        [DllImport("user32.dll")]
-        private static extern bool IsWindowVisible(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern bool IsZoomed(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
-
-        [DllImport("user32.dll")]
-        private static extern bool SetForegroundWindow(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-
-        /// <summary>True when we are hosted by Windows Terminal (default on Windows 11).</summary>
+        /// <summary>True when running inside Windows Terminal (WSL). Kept for compatibility.</summary>
         public static bool IsWindowsTerminal =>
-            !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION")) ||
-            !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_PROFILE_ID"));
+            !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION"));
 
         public static bool MaximizedNatively { get; private set; }
 
@@ -66,14 +32,14 @@ namespace StyleOS
             get { try { return Math.Max(10, Console.WindowHeight); } catch { return 25; } }
         }
 
-        /// <summary>Enable ANSI/VT sequences. Safe to call on any platform.</summary>
-        public static void EnableAnsi()
+        /// <summary>
+        /// UTF-8 in and out, plus signal handling. With interactive = true (a real session)
+        /// Ctrl+C is delivered as a key, the way the Windows console did it: the line editor
+        /// discards the line and nano/top/watch see the key, instead of the whole OS dying.
+        /// </summary>
+        public static void EnableAnsi(bool interactive = true)
         {
-            try
-            {
-                Console.OutputEncoding = System.Text.Encoding.UTF8;
-            }
-            catch { }
+            try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { }
 
             try
             {
@@ -82,90 +48,67 @@ namespace StyleOS
             }
             catch { }
 
-            if (!Kernel.IsWindows) return;
+            if (!interactive) return;
 
             try
             {
-                IntPtr handle = GetStdHandle(STD_OUTPUT_HANDLE);
-                if (handle != IntPtr.Zero && GetConsoleMode(handle, out uint mode))
-                    SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT);
+                if (!Console.IsInputRedirected) Console.TreatControlCAsInput = true;
+            }
+            catch { }
+
+            InstallSignalHandlers();
+        }
+
+        /// <summary>
+        /// SIGINT (only reaches us while a host program runs in the foreground) cancels that
+        /// program, not StyleOS. SIGTERM / SIGHUP put the terminal colours and cursor back
+        /// before the process goes away.
+        /// </summary>
+        public static void InstallSignalHandlers()
+        {
+            if (_handlersInstalled) return;
+            _handlersInstalled = true;
+
+            try
+            {
+                Console.CancelKeyPress += (sender, e) =>
+                {
+                    e.Cancel = true;
+                    Kernel.CancelRequested = true;
+                };
+            }
+            catch { }
+
+            try
+            {
+                _sigTerm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, ctx => Reset());
+                _sigHup = PosixSignalRegistration.Create(PosixSignal.SIGHUP, ctx => Reset());
             }
             catch { }
         }
 
         /// <summary>
-        /// Make the terminal take the whole screen. Tries every strategy that exists,
-        /// because no single one works on both conhost (Win10) and Windows Terminal (Win11).
+        /// Ask the terminal to maximize itself (CSI 9;1 t). Termux is always fullscreen
+        /// already, and redirected output has no window at all.
         /// </summary>
         public static void GoFullscreen()
         {
-            if (!Kernel.IsWindows)
-            {
-                TryGrowBuffer();
-                return;
-            }
-
             MaximizedNatively = false;
+            if (Console.IsOutputRedirected) return;
 
-            // 1) Classic conhost: the console window is a real, visible top level window.
-            try
-            {
-                IntPtr hwnd = GetConsoleWindow();
-                if (hwnd != IntPtr.Zero)
-                {
-                    IntPtr owner = GetAncestor(hwnd, GA_ROOTOWNER);
-                    if (owner != IntPtr.Zero) hwnd = owner;
-
-                    if (IsWindowVisible(hwnd))
-                    {
-                        ShowWindow(hwnd, SW_SHOW);
-                        ShowWindow(hwnd, SW_MAXIMIZE);
-                        SetForegroundWindow(hwnd);
-                        MaximizedNatively = IsZoomed(hwnd);
-                    }
-                }
-            }
-            catch { }
-
-            // 2) Windows Terminal / ConPTY: the window handle above is hidden, so ask the
-            //    terminal itself over VT. CSI 9;3t = maximize (XTWINOPS). Unsupported hosts
-            //    ignore it instead of printing garbage, since VT processing is on by now.
-            if (!MaximizedNatively)
+            if (!HostPlatform.IsTermux)
             {
                 try
                 {
-                    Console.Write("\x1b[9;3t");
+                    Console.Write("\x1b[9;1t");
                     Console.Out.Flush();
-                    Thread.Sleep(60); // let the host apply the resize before we measure
+                    Thread.Sleep(60); // let the terminal apply the resize before we measure
                 }
                 catch { }
             }
-
-            // 3) Last resort: grow the text area to the largest size the host allows.
-            TryGrowBuffer();
+            else MaximizedNatively = true;
 
             try { Console.Clear(); } catch { }
-        }
-
-        private static void TryGrowBuffer()
-        {
-            try
-            {
-                int w = Console.LargestWindowWidth;
-                int h = Console.LargestWindowHeight;
-                if (w <= 0 || h <= 0) return;
-
-                if (Kernel.IsWindows)
-                {
-                    // Buffer must never be smaller than the window, order matters.
-                    if (Console.BufferWidth < w || Console.BufferHeight < h)
-                        Console.SetBufferSize(Math.Max(Console.BufferWidth, w), Math.Max(Console.BufferHeight, h));
-                }
-
-                if (Console.WindowWidth < w || Console.WindowHeight < h)
-                    Console.SetWindowSize(w, h);
-            }
-            catch { }
         }
 
         /// <summary>Cursor move that never throws when the window is smaller than expected.</summary>
@@ -211,6 +154,7 @@ namespace StyleOS
             {
                 Console.ResetColor();
                 Console.CursorVisible = true;
+                if (!Console.IsOutputRedirected) Console.Write("\x1b[0m");
             }
             catch { }
         }
