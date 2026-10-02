@@ -1,0 +1,9 @@
+out/linux-x64/StyleOS:   ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, for GNU/Linux 2.6.32, BuildID[sha1]=54e94cb764caef9d836e8881aef6df558c0deda6, stripped
+out/linux-arm64/StyleOS: ELF 64-bit LSB pie executable, ARM aarch64, version 1 (SYSV), dynamically linked, interpreter /lib/ld-linux-aarch64.so.1, for GNU/Linux 3.7.0, BuildID[sha1]=6e8ed7cc4bf130c19c68aedafe571e24023b675e, stripped
+total 64020
+drwxr-xr-x  2 runner runner     4096 Oct  2 16:44 .
+drwxr-xr-x 17 runner runner     4096 Oct  2 16:44 ..
+-rw-r--r--  1 runner runner      274 Oct  2 16:44 SHA256SUMS.txt
+-rw-r--r--  1 runner runner 31640312 Oct  2 16:44 styleos-linux-arm64.tar.gz
+-rw-r--r--  1 runner runner 33032709 Oct  2 16:44 styleos-linux-x64.tar.gz
+-rw-r--r--  1 runner runner   866572 Oct  2 16:44 styleos-portable.tar.gz

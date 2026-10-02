@@ -1,0 +1,12 @@
+  Determining projects to restore...
+  Restored /home/runner/work/styleos-linux/styleos-linux/styleos.csproj (in 726 ms).
+/home/runner/work/styleos-linux/styleos-linux/Commands/NetworkCommands.cs(189,61): warning CA1416: This call site is reachable on all platforms. 'IPInterfaceStatistics.NonUnicastPacketsSent' is unsupported on: 'linux'. (https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca1416) [/home/runner/work/styleos-linux/styleos-linux/styleos.csproj]
+  styleos -> /home/runner/work/styleos-linux/styleos-linux/bin/Release/net8.0/StyleOS.dll
+
+Build succeeded.
+
+/home/runner/work/styleos-linux/styleos-linux/Commands/NetworkCommands.cs(189,61): warning CA1416: This call site is reachable on all platforms. 'IPInterfaceStatistics.NonUnicastPacketsSent' is unsupported on: 'linux'. (https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca1416) [/home/runner/work/styleos-linux/styleos-linux/styleos.csproj]
+    1 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:14.30

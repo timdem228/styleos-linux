@@ -1,0 +1,114 @@
+== StyleOS smoke tests: /home/runner/work/styleos-linux/styleos-linux/out/linux-x64/StyleOS
+== data dir: /tmp/tmp.y0QsFdmEYa   work dir: /tmp/tmp.TROceXvzLW
+PASS  --version
+PASS  --help
+PASS  echo
+PASS  variables
+PASS  $? after false
+PASS  && chain
+PASS  || chain
+PASS  pipe + sort -r
+PASS  redirect >
+PASS  redirect >>
+PASS  redirect <
+PASS  alias ll
+PASS  which (builtin)
+PASS  which (host)
+PASS  command not found
+PASS  exit code 127
+PASS  exit code false
+PASS  exit code true
+PASS  help
+PASS  man
+PASS  yes
+PASS  mkdir/cd/pwd
+PASS  touch/ls
+PASS  cp/mv/cat
+PASS  rm
+PASS  ls -l real mode
+PASS  chmod +x
+PASS  chmod octal
+PASS  chmod symbolic
+PASS  ln -s
+PASS  find -name
+PASS  tree
+PASS  file (text)
+PASS  file (ELF)
+PASS  basename
+PASS  dirname
+PASS  head
+PASS  tail
+PASS  grep
+PASS  grep -v
+PASS  sed
+PASS  tr
+PASS  cut
+PASS  uniq -c
+PASS  rev
+PASS  nl
+PASS  diff
+PASS  tee
+PASS  xxd
+PASS  sha256sum
+PASS  md5sum
+PASS  base64
+PASS  base64 -d
+PASS  zip/unzip
+PASS  gzip/gunzip
+PASS  tar -czf/-xzf
+PASS  tar interop: host tar reads StyleOS archive
+PASS  tar interop: StyleOS reads host archive
+PASS  calc
+PASS  expr
+PASS  seq
+PASS  date +%Y
+PASS  cal
+PASS  cowsay
+PASS  banner
+PASS  theme
+PASS  version
+PASS  authors
+PASS  sleep
+PASS  env
+PASS  uname -a
+PASS  fastfetch: kernel
+PASS  fastfetch: host os
+PASS  fastfetch: memory
+PASS  free -h
+PASS  lscpu
+PASS  uptime
+PASS  ps -e
+PASS  journalctl
+PASS  modules (lsmod)
+PASS  systemctl
+PASS  df -h
+PASS  df has a real fs
+PASS  mount
+PASS  lsblk
+PASS  ifconfig
+PASS  nslookup
+PASS  ping
+PASS  curl -I
+PASS  wget
+PASS  whoami
+PASS  id
+PASS  useradd
+PASS  --user bob
+PASS  sudo (as root)
+PASS  su
+PASS  passwd
+PASS  pacman help
+PASS  pacman -Q
+PASS  pacman channel
+PASS  whatsnew
+PASS  nano not in a pipe
+PASS  modules install modules
+PASS  module install + run
+PASS  module data dir
+PASS  module list
+PASS  GUI libraries blocked
+PASS  pip deps (--target)
+PASS  module remove
+PASS  interactive session (boot + login + shell)
+
+RESULT: 110 passed, 0 failed

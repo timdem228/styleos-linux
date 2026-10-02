@@ -1,0 +1,22 @@
+Style OS 1.1.7 (StyleOS Core 1.1.7-styleos), Linux build
+StyleOS runnervm8df0l 1.1.7-styleos #1.1.7 StyleOS Core x64 Style OS
+
+    _______       root@runnervm8df0l
+   /  ___  \      ------------------
+  |  (__ \_|      OS: Style OS 1.1.7 (x64)
+   \___  \        Kernel: StyleOS Core 1.1.7-styleos
+  |\___)  |       Host OS: Ubuntu 24.04.5 LTS (linux 6.17.0-1022-azure)
+   \_____/        Host: Microsoft Corporation Virtual Machine
+                  Uptime: 0 mins
+   StyleOS        Shell: styleshell 1.1
+                  Terminal: console
+                  Resolution: 20x10 cells
+                  Packages: 0 (pacman)
+                  CPU: AMD EPYC 7763 64-Core Processor (4)
+                  GPU: 0x1414 GPU (hyperv_drm)
+                  Memory: 1250MiB / 15989MiB
+                  Runtime: .NET 8.0.31
+                  Locale: 
+
+                                          
+

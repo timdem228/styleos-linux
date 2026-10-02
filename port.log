@@ -1,0 +1,4 @@
++ '[' '!' -f port/apply_linux.py ']'
++ echo 'port already applied'
+port already applied
++ exit 0
