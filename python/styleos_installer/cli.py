@@ -19,6 +19,17 @@ DOTNET_CHANNEL = "8.0"
 DOTNET_MIN_MAJOR = 8
 DOTNET_INSTALL_URL = "https://dot.net/v1/dotnet-install.sh"
 
+# `styleos run` exports this before starting StyleOS. On Termux/Android the .NET GC
+# tries to reserve a huge heap up front and dies with "GC heap initialization failed"
+# (0x8007000E); a hard limit (0xC800000 = 200 MB) fixes that. An existing
+# DOTNET_GCHeapHardLimit in the environment always wins.
+GC_HEAP_LIMIT_VAR = "DOTNET_GCHeapHardLimit"
+GC_HEAP_LIMIT = "C800000"
+GC_HEAP_LIMIT_ALWAYS = True  # True on the termux branch, Termux-only on main
+
+# keep dpkg from stopping on "config file changed" questions (stdin may be a pipe)
+APT_NONINTERACTIVE = ["-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold"]
+
 
 class InstallError(Exception):
     pass
@@ -42,6 +53,13 @@ def warn(msg):
     print(_color("33", "!! " + msg), file=sys.stderr, flush=True)
 
 
+def _normalize_repo(repo):
+    # a local checkout given as a relative path would break `git remote set-url` later
+    if repo and "://" not in repo and not repo.startswith("git@") and os.path.isdir(os.path.expanduser(repo)):
+        return os.path.abspath(os.path.expanduser(repo))
+    return repo
+
+
 class Ctx:
     def __init__(self, root=None, repo=None, branch=None, dry_run=False):
         root = root or os.environ.get("STYLEOS_INSTALL_ROOT") or os.path.join(os.path.expanduser("~"), ".styleos-install")
@@ -52,13 +70,15 @@ class Ctx:
         self.state_file = os.path.join(self.root, "state.json")
         self.dry_run = dry_run
         state = self.load_state()
-        self.repo = repo or state.get("repo") or os.environ.get("STYLEOS_REPO") or DEFAULT_REPO
-        self.branch = branch or state.get("branch") or os.environ.get("STYLEOS_BRANCH") or DEFAULT_BRANCH
+        # command line > environment > what the last install used > default
+        self.repo = _normalize_repo(repo or os.environ.get("STYLEOS_REPO") or state.get("repo") or DEFAULT_REPO)
+        self.branch = branch or os.environ.get("STYLEOS_BRANCH") or state.get("branch") or DEFAULT_BRANCH
 
     def load_state(self):
         try:
             with open(self.state_file, encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
         except (OSError, ValueError):
             return {}
 
@@ -107,7 +127,7 @@ def sudo_prefix():
 
 
 PKG_MANAGERS = [
-    ("apt-get", ["apt-get", "install", "-y"], {"git": "git", "curl": "curl", "certs": "ca-certificates", "icu": "libicu-dev"}),
+    ("apt-get", ["apt-get", "install", "-y"] + APT_NONINTERACTIVE, {"git": "git", "curl": "curl", "certs": "ca-certificates", "icu": "libicu-dev"}),
     ("dnf", ["dnf", "install", "-y"], {"git": "git", "curl": "curl", "certs": "ca-certificates", "icu": "libicu"}),
     ("yum", ["yum", "install", "-y"], {"git": "git", "curl": "curl", "certs": "ca-certificates", "icu": "libicu"}),
     ("pacman", ["pacman", "-S", "--needed", "--noconfirm"], {"git": "git", "curl": "curl", "certs": "ca-certificates", "icu": "icu"}),
@@ -149,7 +169,7 @@ def dotnet_candidates(ctx):
 def sdk_major(dotnet):
     try:
         out = subprocess.run([dotnet, "--list-sdks"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                             universal_newlines=True, timeout=60).stdout
+                             universal_newlines=True, timeout=60, env=dotnet_env(dotnet)).stdout
     except (OSError, subprocess.SubprocessError):
         return 0
     majors = [int(m) for m in re.findall(r"^(\d+)\.\d+\.\d+", out, re.M)]
@@ -177,6 +197,10 @@ def dotnet_env(dotnet):
     return env
 
 
+def want_gc_limit():
+    return GC_HEAP_LIMIT_ALWAYS or is_termux()
+
+
 def install_deps_termux(ctx, need_dotnet):
     want = [] if which("git") else ["git"]
     if need_dotnet:
@@ -185,14 +209,16 @@ def install_deps_termux(ctx, need_dotnet):
         ok("git and .NET are already installed")
         return
     step("Installing Termux packages: " + " ".join(want))
-    ctx.run(["pkg", "update", "-y"], check=False)
-    if ctx.run(["pkg", "install", "-y"] + want, check=False) == 0:
+    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+    install = ["pkg", "install", "-y"] + APT_NONINTERACTIVE
+    ctx.run(["pkg", "update", "-y"] + APT_NONINTERACTIVE, env=env, check=False)
+    if ctx.run(install + want, env=env, check=False) == 0:
         return
     if need_dotnet:
         warn("dotnet8.0 not found in the main repo, enabling the TUR repository")
-        ctx.run(["pkg", "install", "-y", "tur-repo"], check=False)
-        ctx.run(["pkg", "update", "-y"], check=False)
-        if ctx.run(["pkg", "install", "-y"] + want, check=False) == 0:
+        ctx.run(install + ["tur-repo"], env=env, check=False)
+        ctx.run(["pkg", "update", "-y"] + APT_NONINTERACTIVE, env=env, check=False)
+        if ctx.run(install + want, env=env, check=False) == 0:
             return
     raise InstallError(
         "could not install %s with pkg.\n"
@@ -221,11 +247,19 @@ def install_deps_linux(ctx, need_dotnet):
     pkgs = [names[m] for m in missing]
     step("Installing system packages with %s: %s" % (binary, " ".join(pkgs)))
     prefix = sudo_prefix()
+    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+    if prefix and binary == "apt-get":
+        # sudo drops most of the environment, pass the frontend explicitly
+        prefix = prefix + ["env", "DEBIAN_FRONTEND=noninteractive"]
     if binary == "apt-get":
-        ctx.run(prefix + ["apt-get", "update"], check=False)
-    rc = ctx.run(prefix + cmd + pkgs, check=False)
+        ctx.run(prefix + ["apt-get", "update"], env=env, check=False)
+    rc = ctx.run(prefix + cmd + pkgs, env=env, check=False)
     if rc != 0 and "icu" in missing and len(pkgs) > 1:
-        ctx.run(prefix + cmd + [names[m] for m in missing if m != "icu"], check="git" in missing)
+        # icu has a different name on every distro release - don't let it block git/curl
+        rest = [names[m] for m in missing if m != "icu"]
+        rc = ctx.run(prefix + cmd + rest, env=env, check=False)
+        if rc != 0 and "git" in missing:
+            raise InstallError("could not install git with " + binary)
     elif rc != 0 and "git" in missing:
         raise InstallError("could not install git with " + binary)
 
@@ -236,8 +270,10 @@ def install_dotnet_linux(ctx):
     if not ctx.dry_run:
         os.makedirs(ctx.root, exist_ok=True)
         try:
-            with urllib.request.urlopen(DOTNET_INSTALL_URL, timeout=60) as r, open(script, "wb") as f:
-                f.write(r.read())
+            with urllib.request.urlopen(DOTNET_INSTALL_URL, timeout=60) as r:
+                data = r.read()
+            with open(script, "wb") as f:
+                f.write(data)
         except Exception as e:
             if which("curl"):
                 ctx.run(["curl", "-fsSL", DOTNET_INSTALL_URL, "-o", script])
@@ -260,7 +296,7 @@ def ensure_toolchain(ctx):
         install_deps_linux(ctx, need_dotnet=dotnet is None)
         if dotnet is None:
             dotnet = install_dotnet_linux(ctx)
-    if dotnet is None:
+    if dotnet is None or (not ctx.dry_run and sdk_major(dotnet) < DOTNET_MIN_MAJOR):
         dotnet = find_dotnet(ctx)
     if dotnet is None and ctx.dry_run:
         return "dotnet"
@@ -278,6 +314,8 @@ def fetch_source(ctx):
         ctx.run(["git", "-C", ctx.src, "fetch", "origin", "+refs/heads/%s:refs/remotes/origin/%s" % (ctx.branch, ctx.branch)])
         ctx.run(["git", "-C", ctx.src, "checkout", "-q", "-B", ctx.branch, "origin/" + ctx.branch])
         ctx.run(["git", "-C", ctx.src, "reset", "-q", "--hard", "origin/" + ctx.branch])
+        # make `git pull` (and `pacman update` inside StyleOS) follow the right branch
+        ctx.run(["git", "-C", ctx.src, "branch", "-q", "--set-upstream-to=origin/" + ctx.branch, ctx.branch], check=False)
     else:
         step("Downloading source from " + ctx.repo)
         if not ctx.dry_run and os.path.exists(ctx.src):
@@ -347,23 +385,31 @@ def cmd_run(ctx, args):
         warn("StyleOS is not built yet - run: styleos install")
         return 1
     dotnet = ctx.load_state().get("dotnet")
-    if not dotnet or not os.path.isfile(dotnet):
+    if not dotnet or not os.path.isfile(dotnet) or not os.access(dotnet, os.X_OK):
         dotnet = find_dotnet(ctx) or (dotnet_candidates(ctx) or [None])[0]
     if not dotnet:
-        warn("dotnet was not found - run: styleos install")
-        return 1
-    extra = list(args.args)
+        if ctx.dry_run:
+            dotnet = "dotnet"
+        else:
+            warn("dotnet was not found - run: styleos install")
+            return 1
+    extra = list(getattr(args, "args", None) or [])
     if extra[:1] == ["--"]:
         extra = extra[1:]
     env = dotnet_env(dotnet)
     env["STYLEOS_SOURCE_DIR"] = ctx.src
     env["STYLEOS_INSTALL_DIR"] = ctx.app
     env["STYLEOS_INSTALLER"] = "python"
+    if want_gc_limit():
+        limit = os.environ.get(GC_HEAP_LIMIT_VAR) or GC_HEAP_LIMIT
+        env[GC_HEAP_LIMIT_VAR] = limit
+        print(_color("2", "   $ export %s=%s" % (GC_HEAP_LIMIT_VAR, limit)), flush=True)
     cmd = [dotnet, dll] + extra
     if ctx.dry_run:
         print("   $ " + " ".join(shlex.quote(c) for c in cmd))
         return 0
     sys.stdout.flush()
+    sys.stderr.flush()
     os.execve(cmd[0], cmd, env)
 
 
@@ -377,6 +423,8 @@ def cmd_doctor(ctx, args):
         ("git", which("git") or "MISSING"),
         (".NET SDK", "%s (%d)" % (dotnet, sdk_major(dotnet)) if dotnet else "MISSING (styleos install gets it)"),
         ("libicu", "yes" if has_icu() else "no (invariant mode)"),
+        ("gc limit", "%s=%s on run" % (GC_HEAP_LIMIT_VAR, os.environ.get(GC_HEAP_LIMIT_VAR) or GC_HEAP_LIMIT)
+         if want_gc_limit() else "off"),
         ("root", ctx.root),
         ("source", "%s  %s@%s" % (ctx.src, state.get("branch", "-"), state.get("commit", "-"))
          if os.path.isdir(ctx.src) else "not downloaded"),
@@ -395,9 +443,12 @@ def cmd_uninstall(ctx, args):
             os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share"), "styleos")
         targets.append(data)
     if not args.yes:
-        answer = input("Remove %s? [y/N] " % ", ".join(targets)).strip().lower()
+        try:
+            answer = input("Remove %s? [y/N] " % ", ".join(targets)).strip().lower()
+        except EOFError:
+            answer = ""
         if answer not in ("y", "yes", "д", "да"):
-            print("cancelled")
+            print("cancelled (use -y to skip this question)")
             return 1
     for t in targets:
         if os.path.exists(t):
@@ -418,16 +469,19 @@ def build_parser():
     for name, helptext in (("install", "download build tools + source and build StyleOS"),
                            ("update", "pull the latest source and rebuild")):
         s = sub.add_parser(name, help=helptext)
-        s.add_argument("--branch", help="git branch to build (default main)")
+        s.add_argument("--branch", help="git branch to build (default %s)" % DEFAULT_BRANCH)
         s.add_argument("--repo", help="git URL or local path (default %s)" % DEFAULT_REPO)
         s.add_argument("--dir", dest="sub_dir", help=argparse.SUPPRESS)
         s.add_argument("--dry-run", dest="sub_dry", action="store_true", help=argparse.SUPPRESS)
     r = sub.add_parser("run", help="start StyleOS (extra arguments go to StyleOS)")
     r.add_argument("args", nargs=argparse.REMAINDER)
-    sub.add_parser("doctor", help="show what is installed")
-    u = sub.add_parser("uninstall", help="remove the StyleOS build")
-    u.add_argument("-y", "--yes", action="store_true")
-    u.add_argument("--purge", action="store_true", help="also delete StyleOS users/files")
+    for name, helptext in (("doctor", "show what is installed"), ("uninstall", "remove the StyleOS build")):
+        s = sub.add_parser(name, help=helptext)
+        s.add_argument("--dir", dest="sub_dir", help=argparse.SUPPRESS)
+        s.add_argument("--dry-run", dest="sub_dry", action="store_true", help=argparse.SUPPRESS)
+        if name == "uninstall":
+            s.add_argument("-y", "--yes", action="store_true")
+            s.add_argument("--purge", action="store_true", help="also delete StyleOS users/files")
     return p
 
 
