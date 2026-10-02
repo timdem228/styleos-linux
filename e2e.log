@@ -1,0 +1,46 @@
+:: Checking build tools (Linux x86_64)
+   system packages are already there
+:: Installing the .NET 8.0 SDK into /home/runner/.styleos-install/dotnet
+   $ bash /home/runner/.styleos-install/dotnet-install.sh --channel 8.0 --install-dir /home/runner/.styleos-install/dotnet
+dotnet-install: Attempting to download using aka.ms link https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.425/dotnet-sdk-8.0.425-linux-x64.tar.gz
+dotnet-install: Remote file https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.425/dotnet-sdk-8.0.425-linux-x64.tar.gz size is 216833108 bytes.
+dotnet-install: Extracting archive from https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.425/dotnet-sdk-8.0.425-linux-x64.tar.gz
+dotnet-install: Downloaded file size is 216833108 bytes.
+dotnet-install: The remote and local file sizes are equal.
+dotnet-install: Installed version is 8.0.425
+dotnet-install: Adding to current process PATH: `/home/runner/.styleos-install/dotnet`. Note: This change will be visible only when sourcing script.
+dotnet-install: Note that the script does not resolve dependencies during installation.
+dotnet-install: To check the list of dependencies, go to https://learn.microsoft.com/dotnet/core/install, select your operating system and check the "Dependencies" section.
+dotnet-install: Installation finished successfully.
+:: Downloading source from https://github.com/timdem228/styleos-linux.git
+   $ git clone --branch main https://github.com/timdem228/styleos-linux.git /home/runner/.styleos-install/src
+Cloning into '/home/runner/.styleos-install/src'...
+:: Building StyleOS (dotnet publish, first build takes a few minutes)
+   $ /home/runner/.styleos-install/dotnet/dotnet publish /home/runner/.styleos-install/src/styleos.csproj -c Release -o /home/runner/.styleos-install/app.new -p:UseAppHost=false -nologo
+  Determining projects to restore...
+  Restored /home/runner/.styleos-install/src/styleos.csproj (in 516 ms).
+/home/runner/.styleos-install/src/Commands/NetworkCommands.cs(189,61): warning CA1416: This call site is reachable on all platforms. 'IPInterfaceStatistics.NonUnicastPacketsSent' is unsupported on: 'linux'. (https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca1416) [/home/runner/.styleos-install/src/styleos.csproj]
+  styleos -> /home/runner/.styleos-install/src/bin/Release/net8.0/StyleOS.dll
+  styleos -> /home/runner/.styleos-install/app.new/
+   built into /home/runner/.styleos-install/app
+:: StyleOS is installed (main@2fc0894). Start it with: styleos run
+installer  1.1.0
+platform   Linux x86_64
+python     3.12.14
+git        /usr/bin/git
+.NET SDK   /home/runner/.styleos-install/dotnet/dotnet (8)
+libicu     yes
+gc limit   DOTNET_GCHeapHardLimit=C800000 on run
+root       /home/runner/.styleos-install
+source     /home/runner/.styleos-install/src  main@2fc0894
+build      /home/runner/.styleos-install/app
+repo       https://github.com/timdem228/styleos-linux.git
+   $ export DOTNET_GCHeapHardLimit=C800000
+StyleOS runnervm8df0l 1.1.7-styleos #1.1.7 StyleOS Core x64 Style OS
+root
+styleos-run-ok
+  All projects are up-to-date for restore.
+  styleos -> /home/runner/.styleos-install/src/bin/Release/net8.0/StyleOS.dll
+  styleos -> /home/runner/.styleos-install/app.new/
+   built into /home/runner/.styleos-install/app
+:: StyleOS is installed (main@2fc0894). Start it with: styleos run
